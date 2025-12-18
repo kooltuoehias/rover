@@ -1,8 +1,8 @@
 # Prep base stage
 ARG TF_VERSION=1.5.5
-
+FROM hashicorp/terraform:${TF_VERSION} AS tf-source
 # Build ui
-FROM node:20-alpine as ui
+FROM node:20-alpine AS ui
 WORKDIR /src
 # Copy specific package files
 COPY ./ui/package-lock.json ./
@@ -18,26 +18,44 @@ COPY ./ui/src ./src
 RUN NODE_OPTIONS='--openssl-legacy-provider' npm run build
 
 # Build rover
-FROM golang:1.21 AS rover
+FROM golang:1.24-bookworm AS rover
+
 WORKDIR /src
+# Copy go.mod and go.sum first for caching
+COPY go.mod go.sum ./
+RUN go mod download
 # Copy full source
 COPY . .
 # Copy ui/dist from ui stage as it needs to embedded
-COPY --from=ui ./src/dist ./ui/dist
+COPY --from=ui /src/dist ./ui/dist
 # Build rover
-RUN go get -d -v golang.org/x/net/html
 RUN CGO_ENABLED=0 GOOS=linux go build -o rover .
 
 # Release stage
-FROM hashicorp/terraform:$TF_VERSION AS release
+# ---------------------------------------------------------
+# Final Release Stage (Debian Bookworm Slim)
+# ---------------------------------------------------------
+FROM debian:bookworm-slim AS release
 
-# Copy rover binary
+ENV DEBIAN_FRONTEND=noninteractive
+
+COPY --from=tf-source /bin/terraform /bin/terraform
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r rover && useradd -r -g rover -m -d /home/rover rover
+
 COPY --from=rover /src/rover /bin/rover
-RUN chmod +x /bin/rover
 
-# Install Google Chrome
-RUN apk add chromium
+RUN chmod +x /bin/rover && \
+    chown rover:rover /bin/rover
 
-WORKDIR /src
+USER rover
+WORKDIR /home/rover
 
-ENTRYPOINT [ "/bin/rover" ]
+ENTRYPOINT ["/bin/rover"]
